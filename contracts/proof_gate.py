@@ -2,7 +2,6 @@
 
 from genlayer import *
 import hashlib
-import json
 
 
 VALID = "VALID"
@@ -12,13 +11,7 @@ PENDING = "PENDING"
 
 
 class ProofGate(gl.Contract):
-    """Consensus-backed semantic evidence attestation primitive.
-
-    A requester freezes a requirement and evidence URL. Validators independently
-    fetch the evidence, derive a content hash, and classify whether the source
-    satisfies the frozen requirement. Only the bounded consensus result is
-    written to persistent state.
-    """
+    """Consensus-backed semantic evidence attestation primitive."""
 
     next_request_id: u256
     requirements: TreeMap[u256, str]
@@ -30,6 +23,12 @@ class ProofGate(gl.Contract):
 
     def __init__(self):
         self.next_request_id = u256(1)
+        self.requirements = TreeMap()
+        self.evidence_urls = TreeMap()
+        self.owners = TreeMap()
+        self.statuses = TreeMap()
+        self.evidence_hashes = TreeMap()
+        self.finalized = TreeMap()
 
     @gl.public.write
     def create_request(self, requirement: str, evidence_url: str) -> u256:
@@ -69,13 +68,10 @@ class ProofGate(gl.Contract):
             evidence_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
             prompt = f"""
 You are a conservative evidence verifier.
-
 Frozen requirement:
 {requirement}
-
-Evidence URL:
+Evidence source URL:
 {evidence_url}
-
 Evidence content:
 {source[:16000]}
 
@@ -85,7 +81,7 @@ Return INVALID only when the evidence affirmatively contradicts or fails the
 requirement. Return UNRESOLVED when the source is insufficient, ambiguous,
 contradictory, or unavailable.
 
-Return JSON only with exactly these fields:
+Return JSON only:
 {{"verdict":"VALID|INVALID|UNRESOLVED"}}
 """
             result = gl.nondet.exec_prompt(prompt, response_format="json")
@@ -106,8 +102,6 @@ Return JSON only with exactly these fields:
                 return False
 
             own = assess_source()
-            # Validators must agree on the bounded semantic verdict and on the
-            # exact bytes that were used as evidence.
             return (
                 own.get("verdict") == leader_data.get("verdict")
                 and own.get("evidence_hash") == leader_data.get("evidence_hash")
