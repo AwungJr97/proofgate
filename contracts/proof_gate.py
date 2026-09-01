@@ -23,6 +23,12 @@ class ProofGate(gl.Contract):
 
     def __init__(self):
         self.next_request_id = u256(1)
+        self.requirements = TreeMap[u256, str]()
+        self.evidence_urls = TreeMap[u256, str]()
+        self.owners = TreeMap[u256, Address]()
+        self.statuses = TreeMap[u256, str]()
+        self.evidence_hashes = TreeMap[u256, str]()
+        self.finalized = TreeMap[u256, bool]()
 
     @gl.public.write
     def create_request(self, requirement: str, evidence_url: str) -> u256:
@@ -78,7 +84,6 @@ class ProofGate(gl.Contract):
                 return {"verdict": UNRESOLVED, "evidence_hash": ""}
 
             evidence_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
-
             prompt = f"""
 You are a conservative evidence verifier.
 
@@ -96,7 +101,7 @@ Decide ONLY from the supplied evidence excerpt.
 Rules:
 - VALID: the excerpt clearly establishes the requirement.
 - INVALID: the excerpt clearly contradicts the requirement.
-- UNRESOLVED: the excerpt is missing, ambiguous, or insufficient.
+- UNRESOLVED: the excerpt is missing, ambiguous, contradictory, or insufficient.
 - Do not use outside knowledge.
 - If the requirement is a direct restatement of a clear statement in the evidence, return VALID.
 
