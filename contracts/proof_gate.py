@@ -23,12 +23,6 @@ class ProofGate(gl.Contract):
 
     def __init__(self):
         self.next_request_id = u256(1)
-        self.requirements = TreeMap()
-        self.evidence_urls = TreeMap()
-        self.owners = TreeMap()
-        self.statuses = TreeMap()
-        self.evidence_hashes = TreeMap()
-        self.finalized = TreeMap()
 
     @gl.public.write
     def create_request(self, requirement: str, evidence_url: str) -> u256:
@@ -38,7 +32,7 @@ class ProofGate(gl.Contract):
             raise gl.UserError("Evidence URL must use http or https")
 
         request_id = self.next_request_id
-        self.next_request_id += 1
+        self.next_request_id += u256(1)
         self.requirements[request_id] = requirement
         self.evidence_urls[request_id] = evidence_url
         self.owners[request_id] = gl.message.sender_address
@@ -51,9 +45,9 @@ class ProofGate(gl.Contract):
     def evaluate(self, request_id: u256) -> str:
         if request_id == 0 or request_id >= self.next_request_id:
             raise gl.UserError("Unknown request")
-        if self.finalized.get(request_id, False):
+        if self.finalized[request_id]:
             raise gl.UserError("Request is already finalized")
-        if self.statuses.get(request_id, PENDING) != PENDING:
+        if self.statuses[request_id] != PENDING:
             raise gl.UserError("Request is not pending")
 
         requirement = self.requirements[request_id]
@@ -77,9 +71,10 @@ Evidence content:
 
 Determine whether the evidence content establishes the frozen requirement.
 Do not invent facts. Use only the supplied evidence.
-Return INVALID only when the evidence affirmatively contradicts or fails the
-requirement. Return UNRESOLVED when the source is insufficient, ambiguous,
-contradictory, or unavailable.
+Return VALID only when the evidence clearly establishes the requirement.
+Return INVALID only when the evidence clearly contradicts or fails it.
+Return UNRESOLVED when evidence is insufficient, ambiguous, contradictory,
+or unavailable.
 
 Return JSON only:
 {{"verdict":"VALID|INVALID|UNRESOLVED"}}
@@ -96,25 +91,29 @@ Return JSON only:
             leader_data = leader_result.calldata
             if not isinstance(leader_data, dict):
                 return False
-            if leader_data.get("verdict") not in (VALID, INVALID, UNRESOLVED):
+            leader_verdict = leader_data.get("verdict")
+            leader_hash = leader_data.get("evidence_hash")
+            if leader_verdict not in (VALID, INVALID, UNRESOLVED):
                 return False
-            if not leader_data.get("evidence_hash"):
+            if not leader_hash:
                 return False
 
             own = assess_source()
             return (
-                own.get("verdict") == leader_data.get("verdict")
-                and own.get("evidence_hash") == leader_data.get("evidence_hash")
+                own.get("verdict") == leader_verdict
+                and own.get("evidence_hash") == leader_hash
             )
 
         result = gl.vm.run_nondet_unsafe(assess_source, validator_fn)
         if not isinstance(result, dict):
-            raise gl.UserError("Invalid consensus result")
+            raise gl.vm.UserError("Invalid consensus result")
 
         verdict = result.get("verdict")
         evidence_hash = result.get("evidence_hash", "")
-        if verdict not in (VALID, INVALID, UNRESOLVED) or not evidence_hash:
-            raise gl.UserError("Consensus returned an invalid attestation")
+        if verdict not in (VALID, INVALID, UNRESOLVED):
+            raise gl.vm.UserError("Consensus returned invalid verdict")
+        if not evidence_hash:
+            raise gl.vm.UserError("Consensus returned no evidence hash")
 
         self.statuses[request_id] = verdict
         self.evidence_hashes[request_id] = evidence_hash
@@ -124,12 +123,12 @@ Return JSON only:
     @gl.public.view
     def get_request(self, request_id: u256) -> dict:
         if request_id == 0 or request_id >= self.next_request_id:
-            raise gl.UserError("Unknown request")
+            raise gl.vm.UserError("Unknown request")
         return {
             "request_id": request_id,
             "requirement": self.requirements[request_id],
             "evidence_url": self.evidence_urls[request_id],
-            "owner": str(self.owners[request_id]),
+            "owner": self.owners[request_id].as_hex,
             "status": self.statuses[request_id],
             "evidence_hash": self.evidence_hashes[request_id],
             "finalized": self.finalized[request_id],
@@ -138,5 +137,5 @@ Return JSON only:
     @gl.public.view
     def get_status(self, request_id: u256) -> str:
         if request_id == 0 or request_id >= self.next_request_id:
-            raise gl.UserError("Unknown request")
+            raise gl.vm.UserError("Unknown request")
         return self.statuses[request_id]
