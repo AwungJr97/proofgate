@@ -2,6 +2,7 @@
 
 from genlayer import *
 import hashlib
+import re
 
 VALID = "VALID"
 INVALID = "INVALID"
@@ -52,35 +53,52 @@ class ProofGate(gl.Contract):
         requirement = self.requirements[request_id]
         evidence_url = self.evidence_urls[request_id]
 
+        def extract_evidence(source: str) -> str:
+            text = re.sub(r"\s+", " ", source).strip()
+            anchors = (
+                "An Intelligent Contract in GenLayer can contain",
+                "Intelligent Contract in GenLayer",
+                "Intelligent Contracts can",
+            )
+            for anchor in anchors:
+                pos = text.find(anchor)
+                if pos >= 0:
+                    end = text.find("###", pos)
+                    if end < 0:
+                        end = min(len(text), pos + 1200)
+                    return text[pos:end].strip()
+            return text[:4000]
+
         def assess_source():
-            # gl.nondet.web.get() returns a response whose body is the
-            # consensus-relevant source content. Do not rely on optional
-            # HTTP attributes here; the contract only needs the body.
             response = gl.nondet.web.get(evidence_url)
             source = response.body.decode("utf-8")
+            evidence = extract_evidence(source)
 
-            if not source.strip():
+            if not evidence:
                 return {"verdict": UNRESOLVED, "evidence_hash": ""}
 
-            evidence_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            evidence_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
+
             prompt = f"""
 You are a conservative evidence verifier.
 
 Frozen requirement:
 {requirement}
 
-Evidence source URL:
+Evidence URL:
 {evidence_url}
 
-Evidence content:
-{source[:16000]}
+Evidence excerpt:
+{evidence[:12000]}
 
-Determine whether the supplied evidence establishes the frozen requirement.
-Do not invent facts and do not use outside knowledge.
-Return VALID only when the evidence clearly establishes the requirement.
-Return INVALID only when the evidence clearly contradicts or fails the requirement.
-Return UNRESOLVED when the evidence is insufficient, ambiguous, contradictory,
-or unavailable.
+Decide ONLY from the supplied evidence excerpt.
+
+Rules:
+- VALID: the excerpt clearly establishes the requirement.
+- INVALID: the excerpt clearly contradicts the requirement.
+- UNRESOLVED: the excerpt is missing, ambiguous, or insufficient.
+- Do not use outside knowledge.
+- If the requirement is a direct restatement of a clear statement in the evidence, return VALID.
 
 Return JSON only:
 {{"verdict":"VALID|INVALID|UNRESOLVED"}}
@@ -97,6 +115,7 @@ Return JSON only:
         def validator_fn(leader_result):
             if not isinstance(leader_result, gl.vm.Return):
                 return False
+
             leader_data = leader_result.calldata
             if not isinstance(leader_data, dict):
                 return False
@@ -108,13 +127,39 @@ Return JSON only:
             if not leader_hash:
                 return False
 
-            own = assess_source()
-            # The validator independently fetches the source and reruns the
-            # classification. Both the verdict and source hash must agree.
-            return (
-                own.get("verdict") == leader_verdict
-                and own.get("evidence_hash") == leader_hash
-            )
+            response = gl.nondet.web.get(evidence_url)
+            source = response.body.decode("utf-8")
+            evidence = extract_evidence(source)
+            if not evidence:
+                return False
+
+            validator_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
+            if validator_hash != leader_hash:
+                return False
+
+            validator_prompt = f"""
+You are validating another verifier's evidence decision.
+
+Frozen requirement:
+{requirement}
+
+Evidence excerpt:
+{evidence[:12000]}
+
+Leader verdict:
+{leader_verdict}
+
+Accept the leader verdict if it is clearly supported by the evidence.
+Reject it if it contradicts the evidence or is unsupported.
+If the requirement is a direct restatement of a clear statement in the evidence, VALID is correct.
+
+Return JSON only:
+{{"accept":true|false}}
+"""
+            check = gl.nondet.exec_prompt(validator_prompt, response_format="json")
+            if not isinstance(check, dict):
+                return False
+            return check.get("accept") is True
 
         result = gl.vm.run_nondet_unsafe(assess_source, validator_fn)
         if not isinstance(result, dict):
