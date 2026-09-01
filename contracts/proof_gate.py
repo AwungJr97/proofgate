@@ -21,12 +21,8 @@ class ProofGate(gl.Contract):
     finalized: TreeMap[u256, bool]
 
     def __init__(self):
+        # GenLayer storage collections are zero-initialized automatically.
         self.next_request_id = u256(1)
-        self.requirements = TreeMap()
-        self.evidence_urls = TreeMap()
-        self.statuses = TreeMap()
-        self.evidence_hashes = TreeMap()
-        self.finalized = TreeMap()
 
     @gl.public.write
     def create_request(self, requirement: str, evidence_url: str) -> u256:
@@ -34,6 +30,7 @@ class ProofGate(gl.Contract):
             raise gl.UserError("Requirement cannot be empty")
         if not evidence_url.startswith(("https://", "http://")):
             raise gl.UserError("Evidence URL must use http or https")
+
         request_id = self.next_request_id
         self.next_request_id += u256(1)
         self.requirements[request_id] = requirement
@@ -61,6 +58,7 @@ class ProofGate(gl.Contract):
             evidence = re.sub(r"\s+", " ", source).strip()[:12000]
             if not evidence:
                 return {"verdict": UNRESOLVED, "evidence_hash": ""}
+
             evidence_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
             prompt = f"""
 You are a conservative evidence verifier.
@@ -90,18 +88,22 @@ Return JSON only: {{"verdict":"VALID|INVALID|UNRESOLVED"}}
             leader_verdict = data.get("verdict")
             if leader_verdict not in (VALID, INVALID, UNRESOLVED) or not leader_hash:
                 return False
+
             response = gl.nondet.web.get(evidence_url)
             source = response.body.decode("utf-8")
             evidence = re.sub(r"\s+", " ", source).strip()[:12000]
-            return hashlib.sha256(evidence.encode("utf-8")).hexdigest() == leader_hash
+            validator_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
+            return validator_hash == leader_hash
 
         result = gl.vm.run_nondet_unsafe(assess_source, validator_fn)
         if not isinstance(result, dict):
             raise gl.UserError("Invalid consensus result")
+
         verdict = result.get("verdict")
         evidence_hash = result.get("evidence_hash", "")
         if verdict not in (VALID, INVALID, UNRESOLVED) or not evidence_hash:
             raise gl.UserError("Consensus returned an invalid attestation")
+
         self.statuses[request_id] = verdict
         self.evidence_hashes[request_id] = evidence_hash
         self.finalized[request_id] = True
