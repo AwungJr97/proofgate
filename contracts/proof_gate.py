@@ -16,7 +16,6 @@ class ProofGate(gl.Contract):
     next_request_id: u256
     requirements: TreeMap[u256, str]
     evidence_urls: TreeMap[u256, str]
-    owners: TreeMap[u256, Address]
     statuses: TreeMap[u256, str]
     evidence_hashes: TreeMap[u256, str]
     finalized: TreeMap[u256, bool]
@@ -25,7 +24,6 @@ class ProofGate(gl.Contract):
         self.next_request_id = u256(1)
         self.requirements = TreeMap()
         self.evidence_urls = TreeMap()
-        self.owners = TreeMap()
         self.statuses = TreeMap()
         self.evidence_hashes = TreeMap()
         self.finalized = TreeMap()
@@ -36,12 +34,10 @@ class ProofGate(gl.Contract):
             raise gl.UserError("Requirement cannot be empty")
         if not evidence_url.startswith(("https://", "http://")):
             raise gl.UserError("Evidence URL must use http or https")
-
         request_id = self.next_request_id
         self.next_request_id += u256(1)
         self.requirements[request_id] = requirement
         self.evidence_urls[request_id] = evidence_url
-        self.owners[request_id] = gl.message.sender_address
         self.statuses[request_id] = PENDING
         self.evidence_hashes[request_id] = ""
         self.finalized[request_id] = False
@@ -59,35 +55,24 @@ class ProofGate(gl.Contract):
         requirement = self.requirements[request_id]
         evidence_url = self.evidence_urls[request_id]
 
-        def extract_evidence(source: str) -> str:
-            text = re.sub(r"\s+", " ", source).strip()
-            return text[:12000]
-
         def assess_source():
             response = gl.nondet.web.get(evidence_url)
             source = response.body.decode("utf-8")
-            evidence = extract_evidence(source)
+            evidence = re.sub(r"\s+", " ", source).strip()[:12000]
             if not evidence:
                 return {"verdict": UNRESOLVED, "evidence_hash": ""}
-
             evidence_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
             prompt = f"""
 You are a conservative evidence verifier.
-Frozen requirement:
-{requirement}
-Evidence URL:
-{evidence_url}
-Evidence content:
-{evidence}
+Requirement: {requirement}
+Evidence URL: {evidence_url}
+Evidence content: {evidence}
 
-Determine whether the supplied evidence clearly establishes the frozen requirement.
 Use only the supplied evidence. Do not invent facts.
 Return VALID when the evidence clearly establishes the requirement.
 Return INVALID only when it clearly contradicts the requirement.
 Otherwise return UNRESOLVED.
-
-Return JSON only:
-{{"verdict":"VALID|INVALID|UNRESOLVED"}}
+Return JSON only: {{"verdict":"VALID|INVALID|UNRESOLVED"}}
 """
             result = gl.nondet.exec_prompt(prompt, response_format="json")
             verdict = result.get("verdict", UNRESOLVED) if isinstance(result, dict) else UNRESOLVED
@@ -98,29 +83,25 @@ Return JSON only:
         def validator_fn(leader_result):
             if not isinstance(leader_result, gl.vm.Return):
                 return False
-            leader_data = leader_result.calldata
-            if not isinstance(leader_data, dict):
+            data = leader_result.calldata
+            if not isinstance(data, dict):
                 return False
-            leader_verdict = leader_data.get("verdict")
-            leader_hash = leader_data.get("evidence_hash")
+            leader_hash = data.get("evidence_hash")
+            leader_verdict = data.get("verdict")
             if leader_verdict not in (VALID, INVALID, UNRESOLVED) or not leader_hash:
                 return False
-
             response = gl.nondet.web.get(evidence_url)
             source = response.body.decode("utf-8")
-            evidence = extract_evidence(source)
-            validator_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
-            return validator_hash == leader_hash
+            evidence = re.sub(r"\s+", " ", source).strip()[:12000]
+            return hashlib.sha256(evidence.encode("utf-8")).hexdigest() == leader_hash
 
         result = gl.vm.run_nondet_unsafe(assess_source, validator_fn)
         if not isinstance(result, dict):
             raise gl.UserError("Invalid consensus result")
-
         verdict = result.get("verdict")
         evidence_hash = result.get("evidence_hash", "")
         if verdict not in (VALID, INVALID, UNRESOLVED) or not evidence_hash:
             raise gl.UserError("Consensus returned an invalid attestation")
-
         self.statuses[request_id] = verdict
         self.evidence_hashes[request_id] = evidence_hash
         self.finalized[request_id] = True
@@ -134,7 +115,6 @@ Return JSON only:
             "request_id": request_id,
             "requirement": self.requirements[request_id],
             "evidence_url": self.evidence_urls[request_id],
-            "owner": str(self.owners[request_id]),
             "status": self.statuses[request_id],
             "evidence_hash": self.evidence_hashes[request_id],
             "finalized": self.finalized[request_id],
